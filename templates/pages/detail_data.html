@@ -1,0 +1,109 @@
+{% extends 'layouts/app2.html' %}
+{% block content %} 
+<div class="card card-default">
+    <div class="card-header">
+        <center><h3><b>Dataset</b></h3></center>
+    </div>
+    <div class="card-body">
+        <table class="table table-bordered table-striped data-table">
+            <thead>
+                <tr>
+                    <th style="width: 10px;">No</th>
+                    <th>B4</th>
+                    <th>B5</th>
+                    <th>NDVI</th>
+                    <th>Label</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in data %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ item['B4'] }}</td>
+                        <td>{{ item['B5'] }}</td>
+                        <td>{{ item['ndvi'] }}</td>
+                        <td>{{ item['label'] }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card card-default">
+    <div class="card-header">
+        <center><h3><b>Data Pelatihan</b></h3></center>
+    </div>
+    <div class="card-body">
+        <table class="table table-bordered table-striped data-table">
+            <thead>
+                <tr>
+                    <th style="width: 10px;">No</th>
+                    <th>B4</th>
+                    <th>B5</th>
+                    <th>NDVI</th>
+                    <th>Label</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for idx, item in df_train.iterrows() %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ item['B4'] }}</td>
+                        <td>{{ item['B5'] }}</td>
+                        <td>{{ item['ndvi'] }}</td>
+                        <td>{{ item['label'] }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card card-default">
+    <div class="card-header">
+        <center><h3><b>Data Pengujian</b></h3></center>
+    </div>
+    <div class="card-body">
+        <table class="table table-bordered table-striped data-table">
+            <thead>
+                <tr>
+                    <th style="width: 10px;">No</th>
+                    <th>B4</th>
+                    <th>B5</th>
+                    <th>NDVI</th>
+                    <th>Label</th>
+                    <th>Klasifikasi</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for idx, item in df_test.iterrows() %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ item['B4'] }}</td>
+                        <td>{{ item['B5'] }}</td>
+                        <td>{{ item['ndvi'] }}</td>
+                        <td>{{ item['label'] }}</td>
+                        <td>{{ item['klasifikasi'] }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card card-default">
+    <div class="card-header">
+        <center><h3><b>Evaluasi</b></h3></center>
+    </div>
+    <div class="card-body">
+        <center><img src="/static/cm_{{ tahun }}.jpg" width="60%"></center>
+        <br>
+        <br>
+        <h6><b>Accuracy   = </b>{{ accuracy_ }} %</h6>
+        <h6><b>Precission = </b>{{ precision_ }} %</h6>
+        <h6><b>Recall     = </b>{{ recall_ }} %</h6>
+        <h6><b>F1-Score    = </b>{{ f1_score_ }} %</h6>
+    </div>
+</div>
+{% endblock %}
