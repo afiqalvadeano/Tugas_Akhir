@@ -1,5 +1,5 @@
 from flask import Flask, request
-from app.controllers import home, data
+from app.controllers import home, data, luas
 import os
 
 app = Flask(__name__)
@@ -23,6 +23,10 @@ def get_data():
 @app.route("/data/detail/<int:id>")
 def detail_index(id):
     return data.detail_data(id)
+
+@app.route('/index_luas')
+def luas_index():
+    return luas.index()
 
 app.secret_key = '3RDLwwtFttGSxkaDHyFTmvGytBJ2MxWT8ynWm2y79G8jm9ugYxFFDPdHcBBnHp6E'
 app.config['SESSION_TYPE'] = 'filesystem'

@@ -1,5 +1,3 @@
 *.pyc
-.venv
-lorem
 /env
 /__pycache__

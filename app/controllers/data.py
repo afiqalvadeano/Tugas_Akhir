@@ -1,11 +1,16 @@
 from flask import jsonify, render_template, request, flash, redirect, url_for
 from app.models.Tahun import *
 from app.models.Data import *
+from app.models.Hasil import *
+import io
 import ee
+import geemap
+import rasterio
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import earthpy.plot as ep
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 import tensorflow as tf
@@ -43,24 +48,58 @@ def get_ndvi_data():
 
     # Tentukan wilayah
     region_of_interest = ee.Geometry.Rectangle([110.0089, -8.2414, 110.8603, -7.4959]).buffer(5000)
-
+    
     # Tentukan rentang waktu
     start_date = request.form['yearInput']+'-01-01'
     end_date   = request.form['yearInput']+'-12-31'
 
-    # Dapatkan citra Landsat dan hitung NDVI
-    image = ee.ImageCollection('LANDSAT/LC08/C01/T1_SR') \
+    # Dapatkan citra Sentinel-2 dan hitung NDVI
+    image = ee.ImageCollection('COPERNICUS/S2') \
         .filterBounds(region_of_interest) \
         .filterDate(start_date, end_date) \
         .median()
 
+    # Hitung NDVI dari citra Sentinel-2
+    red_band = image.select('B4')  # Pilih band merah (Red)
+    nir_band = image.select('B8')  # Pilih band inframerah dekat (Near Infrared)
+    ndvi = nir_band.subtract(red_band).divide(nir_band.add(red_band)).rename('NDVI')
 
-    ndvi = image.normalizedDifference(['B5', 'B4'])
+    # Clip the NDVI image to the specified ROI
+    ndvi_roi = ndvi.clip(region_of_interest)
+
+    # Convert the NDVI image to a visualization-friendly format
+    ndvi_vis = ndvi_roi.visualize(min=-1, max=1, palette=['blue', 'white', 'green'])
+
+    # Save the NDVI image to a temporary file
+    temp_file = 'static/ndvi_image/'+ request.form['yearInput'] +'.tif'
+    geemap.ee_export_image(ndvi_vis, filename=temp_file, scale=100, region=region_of_interest, file_per_band=False)
+
+    # Load image
+    image_n = rasterio.open(temp_file)
+    height = image_n.height
+    width = image_n.width
+
+    image_vis = []
+    for x in range(1, 4):
+        image_vis.append(image_n.read(x))
+    image_vis = np.stack(image_vis)
+
+    plot_size = (8, 8)
+    fig, ax = plt.subplots(figsize=plot_size)
+    ep.plot_rgb(
+        image_vis,
+        ax=ax,
+        stretch=True,
+    )
+    image_name = 'static/ndvi_image/'+ request.form['yearInput'] +'.jpg'
+    plt.savefig(image_name, format='jpg')
+    plt.clf()
+    plt.close()
 
     # Tambahkan NDVI ke citra
     ndvi_image = image.addBands(ndvi)
 
-    ndvi_data = ndvi_image.select(['B5', 'B4', 'nd']).reduceRegion(
+    ndvi_data = ndvi_image.select(['B4', 'B8', 'NDVI']).reduceRegion(
         reducer=ee.Reducer.toList(),
         geometry=region_of_interest,
         scale=1000,
@@ -79,7 +118,7 @@ def get_ndvi_data():
             return 'vegetasi'
 
     # Terapkan fungsi untuk menentukan label pada setiap baris DataFrame
-    df['label'] = df['nd'].apply(determine_label)
+    df['label'] = df['NDVI'].apply(determine_label)
     print(df.label.value_counts())
 
     # Simpan DataFrame ke file Excel
@@ -90,7 +129,7 @@ def get_ndvi_data():
     X = df.drop('label', axis=1)
     y = df['label']
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
     df_train = X_train.copy()
     df_train['label'] = y_train
@@ -180,18 +219,50 @@ def get_ndvi_data():
         tmp_store = {
             'tahun_id': tahun.serialize()['id'],
             'B4'      : row['B4'],
-            'B5'      : row['B5'],
-            'ndvi'    : row['nd'],
+            'B8'      : row['B8'],
+            'ndvi'    : row['NDVI'],
             'label'   : row['label']
         }
         Data.insert(tmp_store)
+
+    new_input  = reshape_input(np.array(X))
+    prediction = np.argmax(model.predict(new_input), 1).flatten()
+
+    df['klasifikasi'] = le.inverse_transform(prediction)
+
+    # Hitung jumlah piksel untuk setiap kelas dari hasil klasifikasi
+    n_pixels_air = df[df['klasifikasi'] == 'air'].shape[0]
+    n_pixels_lahan_terbangun = df[df['klasifikasi'] == 'lahan terbangun'].shape[0]
+    n_pixels_vegetasi = df[df['klasifikasi'] == 'vegetasi'].shape[0]
+
+    # Resolusi piksel (dalam meter persegi)
+    resolution = 1000
+
+    # Konversi jumlah piksel menjadi luas dalam meter persegi
+    area_air = (n_pixels_air * resolution) / 1000000
+    area_lahan_terbangun = (n_pixels_lahan_terbangun * resolution) / 1000000
+    area_vegetasi = (n_pixels_vegetasi * resolution) / 1000000
+
+    # Print hasil luas
+    print("Luas Air:", area_air, "km2")
+    print("Luas Lahan Terbangun:", area_lahan_terbangun, "km2")
+    print("Luas Vegetasi:", area_vegetasi, "km2")
+
+    hasil = Hasil()
+    hasil.tahun_id = tahun.serialize()['id']
+    hasil.luas_air = area_air
+    hasil.luas_lahan_terbangun = area_lahan_terbangun
+    hasil.luas_vegetasi = area_vegetasi
+    hasil.save()
 
     flash('Proses training selesai & data berhasil disimpan.!', 'success')
     return redirect(url_for('data_index'))
 
 def detail_data(id):
     tahun = Tahun.where('id', id).first().serialize()
-    data  = Data.where('tahun_id', tahun['id']).select('tahun_id', 'B4', 'B5', 'ndvi', 'label').get().serialize()
+    data  = Data.where('tahun_id', tahun['id']).select('tahun_id', 'B4', 'B8', 'ndvi', 'label').get().serialize()
+
+    df_luas = Hasil.where('tahun_id', tahun['id']).get().serialize()
 
     df = pd.DataFrame(data)
     df = df.drop('tahun_id', axis=1)
@@ -200,7 +271,7 @@ def detail_data(id):
     X = df.drop('label', axis=1)
     y = df['label']
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
     df_train = X_train.copy()
     df_train['label'] = y_train
@@ -255,9 +326,9 @@ def detail_data(id):
     print('Recall    : ', recall_)
     print('F1-score  : ', f1_score_)
 
-
     return render_template('pages/detail_data.html', data=data, df_train=df_train, df_test=df_test,
-    accuracy_=accuracy_, precision_=precision_, recall_=recall_, f1_score_=f1_score_, tahun=tahun['tahun'], segment='data')
+    accuracy_=accuracy_, precision_=precision_, recall_=recall_, f1_score_=f1_score_, tahun=tahun['tahun'],
+    df_luas=df_luas, segment='data')
 
 # Function to reshape array input
 def reshape_input(array):

@@ -1,5 +1,6 @@
 {% extends 'layouts/app2.html' %}
-{% block content %} 
+
+{% block content %}
 <div class="card card-default">
     <div class="card-header">
         <center><h3><b>Dataset</b></h3></center>
@@ -10,7 +11,7 @@
                 <tr>
                     <th style="width: 10px;">No</th>
                     <th>B4</th>
-                    <th>B5</th>
+                    <th>B8</th>
                     <th>NDVI</th>
                     <th>Label</th>
                 </tr>
@@ -20,7 +21,7 @@
                     <tr>
                         <td>{{ loop.index }}</td>
                         <td>{{ item['B4'] }}</td>
-                        <td>{{ item['B5'] }}</td>
+                        <td>{{ item['B8'] }}</td>
                         <td>{{ item['ndvi'] }}</td>
                         <td>{{ item['label'] }}</td>
                     </tr>
@@ -40,7 +41,7 @@
                 <tr>
                     <th style="width: 10px;">No</th>
                     <th>B4</th>
-                    <th>B5</th>
+                    <th>B8</th>
                     <th>NDVI</th>
                     <th>Label</th>
                 </tr>
@@ -50,7 +51,7 @@
                     <tr>
                         <td>{{ loop.index }}</td>
                         <td>{{ item['B4'] }}</td>
-                        <td>{{ item['B5'] }}</td>
+                        <td>{{ item['B8'] }}</td>
                         <td>{{ item['ndvi'] }}</td>
                         <td>{{ item['label'] }}</td>
                     </tr>
@@ -70,7 +71,7 @@
                 <tr>
                     <th style="width: 10px;">No</th>
                     <th>B4</th>
-                    <th>B5</th>
+                    <th>B8</th>
                     <th>NDVI</th>
                     <th>Label</th>
                     <th>Klasifikasi</th>
@@ -81,7 +82,7 @@
                     <tr>
                         <td>{{ loop.index }}</td>
                         <td>{{ item['B4'] }}</td>
-                        <td>{{ item['B5'] }}</td>
+                        <td>{{ item['B8'] }}</td>
                         <td>{{ item['ndvi'] }}</td>
                         <td>{{ item['label'] }}</td>
                         <td>{{ item['klasifikasi'] }}</td>
@@ -104,6 +105,18 @@
         <h6><b>Precission = </b>{{ precision_ }} %</h6>
         <h6><b>Recall     = </b>{{ recall_ }} %</h6>
         <h6><b>F1-Score    = </b>{{ f1_score_ }} %</h6>
+    </div>
+</div>
+
+<div class="card card-default">
+    <div class="card-header">
+        <center><h3><b>Luas Lahan</b></h3></center>
+    </div>
+    <div class="card-body">
+        <center><img src="/static/ndvi_image/{{ tahun }}.jpg" width="60%"></center>
+        <p><b>Luas Lahan Air : </b>{{ df_luas[0]['luas_air'] }} km2</p>
+        <p><b>Luas Lahan Terbangun : </b>{{ df_luas[0]['luas_lahan_terbangun'] }} km2</p>
+        <p><b>Luas Lahan Vegetasi : </b>{{ df_luas[0]['luas_vegetasi'] }} km2</p>
     </div>
 </div>
 {% endblock %}
