@@ -3,6 +3,7 @@ from app.controllers import home, data, luas
 import os
 
 app = Flask(__name__)
+app.config['TEMPLATES_AUTO_RELOAD'] = False
 
 @app.route("/")
 def index():

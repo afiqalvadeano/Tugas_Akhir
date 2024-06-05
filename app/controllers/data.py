@@ -1,37 +1,49 @@
-from flask import jsonify, render_template, request, flash, redirect, url_for
+from flask import render_template, request, flash, redirect, url_for
 from app.models.Tahun import *
-from app.models.Data import *
 from app.models.Hasil import *
-import io
 import ee
 import geemap
 import rasterio
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 import earthpy.plot as ep
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import train_test_split
+# from sklearn.model_selection import train_test_split
 import tensorflow as tf
 from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Conv1D, MaxPooling1D, Dense, Dropout, Flatten, Input, GlobalMaxPooling1D
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras import Model
-from tensorflow.keras.utils import to_categorical, plot_model, model_to_dot
+from tensorflow.keras.models import load_model
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score
+import matplotlib
+matplotlib.use('Agg')
 
+# Parameter
+CLASSES     = ['Air', 'Lahan Terbangun', 'Vegetasi']
+N_CLASSES   = len(CLASSES)
+PALETTE     = ['#87CEFA', '#F08080', '#90EE90']
+
+model_path = 'static/model/cnn_model.h5'
 
 def index():
-    tahun = Tahun.get().serialize()
+    tahun = Tahun.order_by('tahun', 'asc').get().serialize()
     return render_template('pages/data.html', tahun=tahun, segment='data')
 
 def delete(id):
     tahun = Tahun.find(id).delete()
-    data  = Data.where('tahun_id', id).delete()
     flash('Data berhasil dihapus.!', 'success')
     return redirect(url_for("data_index"))
+
+# Function to mask clouds using the Sentinel-2 QA60 band
+def maskS2clouds(image):
+    qa = image.select('QA60')
+    # Bits 10 and 11 are clouds and cirrus, respectively
+    cloudBitMask = 1 << 10
+    cirrusBitMask = 1 << 11
+    # Both flags should be set to zero, indicating clear conditions
+    mask = qa.bitwiseAnd(cloudBitMask).eq(0).And(qa.bitwiseAnd(cirrusBitMask).eq(0))
+    return image.updateMask(mask).divide(10000)
 
 def get_ndvi_data():
     np.random.seed(123)
@@ -46,41 +58,39 @@ def get_ndvi_data():
     ee.Authenticate()
     ee.Initialize(project='1031392701041')
 
-    # Tentukan wilayah
-    region_of_interest = ee.Geometry.Rectangle([110.0089, -8.2414, 110.8603, -7.4959]).buffer(5000)
-    
     # Tentukan rentang waktu
     start_date = request.form['yearInput']+'-01-01'
     end_date   = request.form['yearInput']+'-12-31'
 
-    # Dapatkan citra Sentinel-2 dan hitung NDVI
-    image = ee.ImageCollection('COPERNICUS/S2') \
-        .filterBounds(region_of_interest) \
-        .filterDate(start_date, end_date) \
+    # Define the region of interest (ROI)
+    roi = ee.Geometry.Rectangle([110.0089, -8.2414, 110.8603, -7.4959])
+
+    # Create an image collection for Sentinel-2
+    sentinel2 = ee.ImageCollection('COPERNICUS/S2') \
+        .filterBounds(roi) \
+        .filterDate(ee.Date(start_date), ee.Date(end_date)) \
+        .map(maskS2clouds) \
         .median()
 
-    # Hitung NDVI dari citra Sentinel-2
-    red_band = image.select('B4')  # Pilih band merah (Red)
-    nir_band = image.select('B8')  # Pilih band inframerah dekat (Near Infrared)
-    ndvi = nir_band.subtract(red_band).divide(nir_band.add(red_band)).rename('NDVI')
+    # Calculate NDVI
+    ndvi_ = sentinel2.normalizedDifference(['B8', 'B4']).rename('NDVI')  # Redefine to 'NDVI'
 
-    # Clip the NDVI image to the specified ROI
-    ndvi_roi = ndvi.clip(region_of_interest)
-
-    # Convert the NDVI image to a visualization-friendly format
-    ndvi_vis = ndvi_roi.visualize(min=-1, max=1, palette=['blue', 'white', 'green'])
+    # Combine Sentinel-2 image with NDVI
+    sentinel2_with_ndvi = sentinel2.addBands(ndvi_)
 
     # Save the NDVI image to a temporary file
     temp_file = 'static/ndvi_image/'+ request.form['yearInput'] +'.tif'
-    geemap.ee_export_image(ndvi_vis, filename=temp_file, scale=100, region=region_of_interest, file_per_band=False)
+    scale = 200
+    geemap.ee_export_image(sentinel2_with_ndvi, filename=temp_file, scale=scale, region=roi)
 
     # Load image
     image_n = rasterio.open(temp_file)
     height = image_n.height
     width = image_n.width
+    shape = (height, width)
 
     image_vis = []
-    for x in range(1, 4):
+    for x in range(1, len(CLASSES)+1):
         image_vis.append(image_n.read(x))
     image_vis = np.stack(image_vis)
 
@@ -96,163 +106,69 @@ def get_ndvi_data():
     plt.clf()
     plt.close()
 
-    # Tambahkan NDVI ke citra
-    ndvi_image = image.addBands(ndvi)
+    # Buka file GeoTIFF
+    with rasterio.open(temp_file) as src:
+        # Baca data piksel untuk band B4 dan B8
+        red_band = src.read(4)  # Band 4 corresponds to B4 (Red)
+        nir_band = src.read(8)  # Band 8 corresponds to B8 (NIR)
 
-    ndvi_data = ndvi_image.select(['B4', 'B8', 'NDVI']).reduceRegion(
-        reducer=ee.Reducer.toList(),
-        geometry=region_of_interest,
-        scale=1000,
-    )
+        # Hitung NDVI
+        ndvi = (nir_band - red_band) / (nir_band + red_band)
 
-    # Konversi data ke Pandas DataFrame
-    df = pd.DataFrame.from_dict(ndvi_data.getInfo())
+        # Membatasi hasil NDVI ke rentang -1 hingga 1
+        ndvi = ndvi.clip(-1, 1)
+        ndvi = np.nan_to_num(ndvi, nan=1.0)
 
-    # Tentukan fungsi untuk menetapkan label berdasarkan rentang NDVI
-    def determine_label(ndvi_value):
-        if ndvi_value < 0:
-            return 'air'
-        elif ndvi_value >= 0 and ndvi_value <= 0.2:
-            return 'lahan terbangun'
-        else:
-            return 'vegetasi'
+        # Klasifikasi NDVI
+        classified_ndvi = classify_ndvi(ndvi)
 
-    # Terapkan fungsi untuk menentukan label pada setiap baris DataFrame
-    df['label'] = df['NDVI'].apply(determine_label)
-    print(df.label.value_counts())
-
-    # Simpan DataFrame ke file Excel
-    # excel_filename = 'ndvi_data.csv'
-    # df.to_csv(excel_filename, index=False)
-
-    # Split data
-    X = df.drop('label', axis=1)
-    y = df['label']
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-
-    df_train = X_train.copy()
-    df_train['label'] = y_train
-
-    df_test = X_test.copy()
-    df_test['label'] = y_test
+    # Bentuk array data X (gambar) dan Y (label)
+    X = np.stack((red_band.flatten(), nir_band.flatten()), axis=1)  # Stack bands B4 and B8 to create image array
+    y = classified_ndvi.flatten()  # Flatten the classified NDVI array to create label array
 
     # Label encoder
     le = LabelEncoder()
-    le.fit(y_train)
-
-    y_train = le.fit_transform(y_train)
-    y_test  = le.fit_transform(y_test)
+    y = le.fit_transform(y)
 
     # Convert samples dataframe (pandas) to numpy array
-    train_input = reshape_input(np.array(X_train))
-    test_input = reshape_input(np.array(X_test))
+    test_input = reshape_input(np.array(X))
 
     # Also make label data to categorical
-    train_output = to_categorical(y_train, len(le.classes_) + 1)
-    test_output = to_categorical(y_test, len(le.classes_) + 1)
+    test_output = to_categorical(y, N_CLASSES)
 
-    # Show the data shape
-    print(f'Train features: {train_input.shape}\nTest features: {test_input.shape}\nTrain label: {train_output.shape}\nTest label: {test_output.shape}')
+    n_model = load_model(model_path)
 
-    # Make model for our data
-    # Input shape
-    train_shape = train_input.shape
-    input_shape = (train_shape[1], train_shape[2])
-
-    # Model parameter
-    neuron = 128
-    drop = 0.2
-    kernel = 1
-    pool = 1
-
-    # Make sequential model
-    model = Sequential([
-    Input(input_shape),
-    Conv1D(neuron * 1, kernel, activation='relu'),
-    Conv1D(neuron * 1, kernel, activation='relu'),
-    MaxPooling1D(pool),
-    Dropout(drop),
-    Conv1D(neuron * 2, kernel, activation='relu'),
-    Conv1D(neuron * 2, kernel, activation='relu'),
-    MaxPooling1D(pool),
-    Dropout(drop),
-    GlobalMaxPooling1D(),
-    Dense(neuron * 2, activation='relu'),
-    Dropout(drop),
-    Dense(neuron * 1, activation='relu'),
-    Dropout(drop),
-    Dense(len(le.classes_) + 1, activation='softmax')
-    ])
-
-    # Train the model
-    # Compline the model
-    model.compile(
-        optimizer='Adam',
-        loss='CategoricalCrossentropy',
-        metrics=['accuracy']
-    )
-
-    # Create callback to stop training if loss not decreasing
-    stop = EarlyStopping(
-        monitor='val_accuracy',
-        patience=5
-    )
-
-    # Fit the model
-    history = model.fit(
-        x=train_input, y=train_output,
-        validation_data=(test_input, test_output),
-        batch_size=512,
-        callbacks=[stop],
-        epochs=100,
-    )
-
-    # Save model CNN for later use
-    model.save('static/model/cnn_model_'+ request.form['yearInput'] +'.h5')
+    pred     = n_model.predict(test_input, batch_size=1024)
+    pred_img = np.argmax(pred, 1)
+    pred_img = pred_img.reshape(shape[0], shape[1])
 
     tahun = Tahun()
     tahun.tahun = request.form['yearInput']
     tahun.save()
 
-    for index, row in df.fillna(0).iterrows():
-        tmp_store = {
-            'tahun_id': tahun.serialize()['id'],
-            'B4'      : row['B4'],
-            'B8'      : row['B8'],
-            'ndvi'    : row['NDVI'],
-            'label'   : row['label']
-        }
-        Data.insert(tmp_store)
+    # Menghitung jumlah piksel untuk setiap nilai unik dalam data
+    unique_values, counts = np.unique(pred_img, return_counts=True)
 
-    new_input  = reshape_input(np.array(X))
-    prediction = np.argmax(model.predict(new_input), 1).flatten()
+    # Luas tiap piksel dalam meter persegi
+    area_per_pixel_m2 = scale**2
 
-    df['klasifikasi'] = le.inverse_transform(prediction)
+    # Konversi luas dari meter persegi ke kilometer persegi (1 km² = 1,000,000 m²)
+    area_per_pixel_km2 = area_per_pixel_m2 / 1_000_000
 
-    # Hitung jumlah piksel untuk setiap kelas dari hasil klasifikasi
-    n_pixels_air = df[df['klasifikasi'] == 'air'].shape[0]
-    n_pixels_lahan_terbangun = df[df['klasifikasi'] == 'lahan terbangun'].shape[0]
-    n_pixels_vegetasi = df[df['klasifikasi'] == 'vegetasi'].shape[0]
+    # Menghitung luas dalam km² untuk setiap nilai
+    area_km2 = counts * area_per_pixel_km2
 
-    # Resolusi piksel (dalam meter persegi)
-    resolution = 1000
+    # Membulatkan hasil ke dua angka di belakang koma
+    area_km2_rounded = np.round(area_km2, 2)
 
-    # Konversi jumlah piksel menjadi luas dalam meter persegi
-    area_air = (n_pixels_air * resolution) / 1000000
-    area_lahan_terbangun = (n_pixels_lahan_terbangun * resolution) / 1000000
-    area_vegetasi = (n_pixels_vegetasi * resolution) / 1000000
-
-    # Print hasil luas
-    print("Luas Air:", area_air, "km2")
-    print("Luas Lahan Terbangun:", area_lahan_terbangun, "km2")
-    print("Luas Vegetasi:", area_vegetasi, "km2")
+    # Membuat dictionary untuk menyimpan luas setiap nilai dalam km²
+    area_dict_km2 = dict(zip(unique_values, area_km2_rounded))
 
     hasil = Hasil()
     hasil.tahun_id = tahun.serialize()['id']
-    hasil.luas_air = area_air
-    hasil.luas_lahan_terbangun = area_lahan_terbangun
-    hasil.luas_vegetasi = area_vegetasi
+    hasil.luas_air = area_dict_km2.get(0, 0)
+    hasil.luas_lahan_terbangun = area_dict_km2.get(1, 0)
+    hasil.luas_vegetasi = area_dict_km2.get(2, 0)
     hasil.save()
 
     flash('Proses training selesai & data berhasil disimpan.!', 'success')
@@ -260,53 +176,56 @@ def get_ndvi_data():
 
 def detail_data(id):
     tahun = Tahun.where('id', id).first().serialize()
-    data  = Data.where('tahun_id', tahun['id']).select('tahun_id', 'B4', 'B8', 'ndvi', 'label').get().serialize()
 
     df_luas = Hasil.where('tahun_id', tahun['id']).get().serialize()
 
-    df = pd.DataFrame(data)
-    df = df.drop('tahun_id', axis=1)
+    temp_file = 'static/ndvi_image/'+ str(tahun['tahun']) +'.tif'
 
-    # Split data
-    X = df.drop('label', axis=1)
-    y = df['label']
+    # Load image
+    image = rasterio.open(temp_file)
+    # bandNum = image.count
+    height = image.height
+    width = image.width
+    plot_size = (8, 8)
+    shape = (height, width)
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+    # Buka file GeoTIFF
+    with image as src:
+        # Baca data piksel untuk band B4 dan B8
+        red_band = src.read(4)  # Band 4 corresponds to B4 (Red)
+        nir_band = src.read(8)  # Band 8 corresponds to B8 (NIR)
 
-    df_train = X_train.copy()
-    df_train['label'] = y_train
+        # Hitung NDVI
+        ndvi = (nir_band - red_band) / (nir_band + red_band)
 
-    df_test = X_test.copy()
-    df_test['label'] = y_test
+        # Membatasi hasil NDVI ke rentang -1 hingga 1
+        ndvi = ndvi.clip(-1, 1)
+        ndvi = np.nan_to_num(ndvi, nan=1.0)
+
+        # Klasifikasi NDVI
+        classified_ndvi = classify_ndvi(ndvi)
+
+    # Bentuk array data X (gambar) dan Y (label)
+    X = np.stack((red_band.flatten(), nir_band.flatten()), axis=1)  # Stack bands B4 and B8 to create image array
+    y = classified_ndvi.flatten()  # Flatten the classified NDVI array to create label array
 
     # Label encoder
     le = LabelEncoder()
-    le.fit(y_train)
-
-    y_train = le.fit_transform(y_train)
-    y_test  = le.fit_transform(y_test)
+    y = le.fit_transform(y)
 
     # Convert samples dataframe (pandas) to numpy array
-    train_input = reshape_input(np.array(X_train))
-    test_input = reshape_input(np.array(X_test))
+    test_input = reshape_input(np.array(X))
 
     # Also make label data to categorical
-    train_output = to_categorical(y_train, len(le.classes_) + 1)
-    test_output = to_categorical(y_test, len(le.classes_) + 1)
+    test_output = to_categorical(y, N_CLASSES)
 
-    # Show the data shape
-    print(f'Train features: {train_input.shape}\nTest features: {test_input.shape}\nTrain label: {train_output.shape}\nTest label: {test_output.shape}')
-
-    n_model = load_model('static/model/cnn_model_'+ str(tahun['tahun']) +'.h5')
+    n_model = load_model(model_path)
 
     # Predict test data
-    prediction = np.argmax(n_model.predict(test_input), 1).flatten()
+    prediction = np.argmax(n_model.predict(test_input, batch_size=1024), 1).flatten()
     label      = np.argmax(test_output, 1).flatten()
 
-    df_test['klasifikasi'] = le.inverse_transform(prediction)
-
     cm           = confusion_matrix(label, prediction)
-    CLASSES      = ['Air', 'Lahan Terbangun', 'Vegetasi']
     df_confusion = pd.DataFrame(cm, index = CLASSES, columns = CLASSES)
 
     sns.heatmap(df_confusion, annot=True, fmt = "d", cmap=plt.cm.Blues)
@@ -326,11 +245,31 @@ def detail_data(id):
     print('Recall    : ', recall_)
     print('F1-score  : ', f1_score_)
 
-    return render_template('pages/detail_data.html', data=data, df_train=df_train, df_test=df_test,
-    accuracy_=accuracy_, precision_=precision_, recall_=recall_, f1_score_=f1_score_, tahun=tahun['tahun'],
-    df_luas=df_luas, segment='data')
+    pred     = n_model.predict(test_input, batch_size=1024)
+    pred_img = np.argmax(pred, 1)
+    pred_img = pred_img.reshape(shape[0], shape[1])
+
+    # Buat colormap dan normalisasi warna
+    cmap = mcolors.ListedColormap(PALETTE)
+    norm = mcolors.BoundaryNorm(boundaries=[-1, 1, 1.5, 2.5], ncolors=3)
+
+    # Plot bands dengan palet warna yang telah ditentukan
+    ep.plot_bands(pred_img, cmap=cmap, norm=norm, figsize=plot_size)
+    plt.savefig('static/ndvi_image/hasil_'+ str(tahun['tahun']) +'.jpg')
+    plt.close()
+
+    return render_template('pages/detail_data.html', accuracy_=accuracy_, precision_=precision_, recall_=recall_, 
+    f1_score_=f1_score_, tahun=tahun['tahun'], df_luas=df_luas, segment='data')
 
 # Function to reshape array input
 def reshape_input(array):
     shape = array.shape
     return array.reshape(shape[0], shape[1], 1)
+
+# Fungsi untuk mengklasifikasikan nilai NDVI
+def classify_ndvi(ndvi_values):
+    classified_ndvi = np.empty_like(ndvi_values, dtype='object')
+    classified_ndvi[(ndvi_values <= 0)] = "Air"
+    classified_ndvi[((ndvi_values > 0) & (ndvi_values <= 0.2))] = "Lahan Bangunan"
+    classified_ndvi[(ndvi_values > 0.2)] = "Vegetasi"
+    return classified_ndvi
